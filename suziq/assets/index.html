@@ -1,0 +1,113 @@
+<!--
+  Served at http://<uno-q-address>:7000/ by the arduino:web_ui brick
+  (see ../python/main.py). Two things in one page: a manual test form that
+  POSTs a photo straight to /consult, the same endpoint the Sense uses, and
+  a browsable history of past readings (successes and misses) pulled from
+  GET /history - useful for debugging without needing the physical device.
+-->
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Oracle - manual test</title>
+<style>
+  body { font-family: sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; }
+  img { max-width: 100%; margin-top: 1rem; border-radius: 8px; }
+  #status { margin-top: 1rem; white-space: pre-wrap; }
+  button { padding: 0.5rem 1rem; font-size: 1rem; }
+  #history { margin-top: 2rem; border-top: 1px solid #ccc; padding-top: 1rem; }
+  .entry { margin-bottom: 1rem; }
+  .entry .meta { color: #666; font-size: 0.85rem; }
+  .entry .reading { white-space: pre-wrap; margin: 0.25rem 0; }
+  .entry audio { width: 100%; height: 32px; }
+  .entry { display: flex; gap: 0.75rem; }
+  .entry .thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .entry .body { flex: 1; min-width: 0; }
+  .entry .miss { color: #a33; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>🔮 Oracle - manual test</h1>
+  <p>Upload a photo of the two dice. This hits the same <code>/consult</code> endpoint the Sense will use.</p>
+  <input type="file" id="file" accept="image/*">
+  <br>
+  <img id="preview" style="display:none">
+  <div id="status"></div>
+  <audio id="player" controls style="display:none; margin-top:1rem; width:100%"></audio>
+
+  <div id="history">
+    <h2>Recent readings</h2>
+    <div id="history-list">Loading...</div>
+  </div>
+
+<script>
+const fileInput = document.getElementById('file');
+const preview = document.getElementById('preview');
+const status = document.getElementById('status');
+const player = document.getElementById('player');
+const historyList = document.getElementById('history-list');
+
+async function loadHistory() {
+  try {
+    const resp = await fetch('/history');
+    const data = await resp.json();
+    if (!data.readings || data.readings.length === 0) {
+      historyList.textContent = 'No readings yet.';
+      return;
+    }
+    historyList.innerHTML = data.readings.map(r => {
+      const ok = r.status === 'ok';
+      const meta = ok
+        ? `#${r.id} - ${r.timestamp} - Reality ${r.reality}, Spiritual ${r.spiritual}`
+        : `#${r.id} - ${r.timestamp} - no detection (found ${r.num_boxes ?? 0} confident)`;
+      const body = ok
+        ? `<div class="reading">${r.reading}</div><audio controls src="/history/${r.id}/audio"></audio>`
+        : `<div class="miss">Couldn't read two dice from this shot.</div>`;
+      return `
+        <div class="entry">
+          <img class="thumb" src="/history/${r.id}/image" loading="lazy">
+          <div class="body">
+            <div class="meta">${meta}</div>
+            ${body}
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    historyList.textContent = 'Failed to load history: ' + e;
+  }
+}
+loadHistory();
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  preview.src = URL.createObjectURL(file);
+  preview.style.display = 'block';
+  player.style.display = 'none';
+  status.textContent = 'Consulting the Oracle...';
+
+  try {
+    const resp = await fetch('/consult', { method: 'POST', body: file });
+    if (resp.status !== 200) {
+      status.textContent = 'Error ' + resp.status + ': ' + await resp.text();
+      return;
+    }
+    const reality = decodeURIComponent(resp.headers.get('X-Reality') || '');
+    const spiritual = decodeURIComponent(resp.headers.get('X-Spiritual') || '');
+    const reading = decodeURIComponent(resp.headers.get('X-Reading') || '');
+    status.textContent = `Reality: ${reality}   Spiritual: ${spiritual}\n\n${reading}`;
+
+    const blob = await resp.blob();
+    player.src = URL.createObjectURL(blob);
+    player.style.display = 'block';
+    player.play();
+    loadHistory();
+  } catch (e) {
+    status.textContent = 'Request failed: ' + e;
+  }
+});
+</script>
+</body>
+</html>

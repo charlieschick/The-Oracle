@@ -1,0 +1,272 @@
+<!--
+  Standalone browser tool for browsing/downloading/deleting files on the
+  Sense's SD card over CircuitPython's Web Workflow - no USB needed. Open
+  this file directly in a browser, then enter the board's Web Workflow
+  address (e.g. http://oracle-sense.local) and the CIRCUITPY_WEB_API_PASSWORD
+  from its settings.toml. Handy during dataset collection to spot-check
+  captures without unplugging the board.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Oracle Sense - SD Manager</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #1a1a1a; color: #eee; }
+  h1 { font-size: 1.3rem; }
+  .config { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  input { background: #2a2a2a; color: #eee; border: 1px solid #444; padding: 0.4rem; border-radius: 4px; }
+  input[type=text] { flex: 1; min-width: 200px; }
+  button { background: #3a5; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; }
+  button.danger { background: #a33; }
+  button.secondary { background: #555; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .bulkbar { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+  th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid #333; }
+  td.checkbox, th.checkbox { width: 1.5rem; }
+  td.actions { display: flex; gap: 0.4rem; }
+  .path { font-family: monospace; color: #9c9; margin: 0.5rem 0; }
+  .status { color: #c95; min-height: 1.2rem; margin: 0.5rem 0; }
+  .folder { cursor: pointer; color: #6cf; }
+  #preview { max-width: 100%; max-height: 60vh; display: none; margin-top: 1rem; border: 1px solid #444; }
+</style>
+</head>
+<body>
+<h1>Oracle Sense - SD Card Manager</h1>
+
+<div class="config">
+  <input id="host" type="text" placeholder="hostname (e.g. cpy-esp32_s3_sense-1cdbd474fb60.local)">
+  <input id="password" type="password" placeholder="web API password">
+  <button id="connectBtn">Connect</button>
+</div>
+
+<div class="path">Path: <span id="pathDisplay">/sd/</span></div>
+<div class="status" id="status"></div>
+
+<div class="bulkbar">
+  <button id="deleteSelectedBtn" class="danger" disabled>Delete selected (<span id="selectedCount">0</span>)</button>
+</div>
+
+<table>
+  <thead><tr><th class="checkbox"><input type="checkbox" id="selectAll"></th><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+  <tbody id="fileList"></tbody>
+</table>
+
+<img id="preview">
+
+<script>
+let host = localStorage.getItem('sd_manager_host') || '';
+let password = localStorage.getItem('sd_manager_password') || '';
+let currentPath = '/sd/';
+let selected = new Set(); // full paths of files checked for bulk delete, cleared on navigation
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+document.getElementById('host').value = host;
+document.getElementById('password').value = password;
+
+function setStatus(msg, isError) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = isError ? '#e66' : '#c95';
+}
+
+function authHeader() {
+  return 'Basic ' + btoa(':' + password);
+}
+
+function apiUrl(path) {
+  return `http://${host}/fs${path}`;
+}
+
+async function apiFetch(path, options = {}) {
+  options.headers = Object.assign({ 'Authorization': authHeader() }, options.headers || {});
+  const res = await fetch(apiUrl(path), options);
+  if (!res.ok) throw new Error(`${options.method || 'GET'} ${path} -> HTTP ${res.status}`);
+  return res;
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+async function loadDir(path) {
+  currentPath = path;
+  selected.clear();
+  updateBulkBar();
+  document.getElementById('pathDisplay').textContent = path;
+  setStatus('Loading...');
+  try {
+    const res = await apiFetch(path, { headers: { 'Accept': 'application/json' } });
+    const data = await res.json();
+    renderFiles(data.files || []);
+    setStatus(`${(data.files || []).length} item(s). Free: ${formatSize(data.free)} / ${formatSize(data.total)}`);
+  } catch (e) {
+    setStatus(e.message, true);
+    document.getElementById('fileList').innerHTML = '';
+  }
+}
+
+function updateBulkBar() {
+  const count = selected.size;
+  document.getElementById('selectedCount').textContent = count;
+  document.getElementById('deleteSelectedBtn').disabled = count === 0;
+  const fileCheckboxes = document.querySelectorAll('#fileList input[type=checkbox]');
+  const selectAll = document.getElementById('selectAll');
+  selectAll.checked = fileCheckboxes.length > 0 &&
+    Array.from(fileCheckboxes).every(cb => cb.checked);
+}
+
+function renderFiles(files) {
+  const tbody = document.getElementById('fileList');
+  tbody.innerHTML = '';
+
+  if (currentPath !== '/sd/') {
+    const up = currentPath.replace(/[^/]+\/$/, '');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td></td><td class="folder">.. (up)</td><td></td><td></td><td></td>`;
+    tr.querySelector('.folder').onclick = () => loadDir(up);
+    tbody.appendChild(tr);
+  }
+
+  files.sort((a, b) => (b.directory - a.directory) || a.name.localeCompare(b.name));
+
+  for (const f of files) {
+    const tr = document.createElement('tr');
+    const modified = f.modified_ns ? new Date(f.modified_ns / 1e6).toLocaleString() : '';
+    const nameCell = f.directory
+      ? `<td class="folder">${f.name}/</td>`
+      : `<td>${f.name}</td>`;
+    const path = currentPath + f.name;
+    const checkboxCell = f.directory ? '<td></td>' :
+      `<td class="checkbox"><input type="checkbox" data-path="${path}"></td>`;
+    tr.innerHTML = `${checkboxCell}${nameCell}<td>${f.directory ? '' : formatSize(f.file_size)}</td><td>${modified}</td><td class="actions"></td>`;
+
+    if (f.directory) {
+      tr.querySelector('.folder').onclick = () => loadDir(currentPath + f.name + '/');
+    } else {
+      const checkbox = tr.querySelector('input[type=checkbox]');
+      checkbox.onchange = () => {
+        if (checkbox.checked) selected.add(path); else selected.delete(path);
+        updateBulkBar();
+      };
+
+      const actions = tr.querySelector('.actions');
+
+      const viewBtn = document.createElement('button');
+      viewBtn.textContent = 'View';
+      viewBtn.className = 'secondary';
+      viewBtn.onclick = () => viewFile(currentPath + f.name);
+      actions.appendChild(viewBtn);
+
+      const dlBtn = document.createElement('button');
+      dlBtn.textContent = 'Download';
+      dlBtn.className = 'secondary';
+      dlBtn.onclick = () => downloadFile(currentPath + f.name, f.name);
+      actions.appendChild(dlBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Delete';
+      delBtn.className = 'danger';
+      delBtn.onclick = () => deleteFile(currentPath + f.name);
+      actions.appendChild(delBtn);
+    }
+    tbody.appendChild(tr);
+  }
+  updateBulkBar();
+}
+
+async function viewFile(path) {
+  setStatus(`Loading ${path}...`);
+  try {
+    const res = await apiFetch(path);
+    const blob = await res.blob();
+    const img = document.getElementById('preview');
+    img.src = URL.createObjectURL(blob);
+    img.style.display = 'block';
+    setStatus(`Viewing ${path}`);
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+async function downloadFile(path, name) {
+  setStatus(`Downloading ${path}...`);
+  try {
+    const res = await apiFetch(path);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setStatus(`Downloaded ${name}`);
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+async function deleteFile(path) {
+  if (!confirm(`Delete ${path}?`)) return;
+  setStatus(`Deleting ${path}...`);
+  try {
+    await apiFetch(path, { method: 'DELETE' });
+    // This little device seems to choke on requests fired right after one
+    // another - give it a beat before asking for the refreshed listing.
+    await sleep(400);
+    setStatus(`Deleted ${path}, refreshing...`);
+    await loadDir(currentPath);
+  } catch (e) {
+    setStatus(`Delete failed: ${e.message}`, true);
+  }
+}
+
+async function bulkDelete() {
+  const paths = Array.from(selected);
+  if (paths.length === 0) return;
+  if (!confirm(`Delete ${paths.length} file(s)?`)) return;
+
+  const failures = [];
+  for (let i = 0; i < paths.length; i++) {
+    setStatus(`Deleting ${i + 1}/${paths.length}: ${paths[i]}...`);
+    try {
+      await apiFetch(paths[i], { method: 'DELETE' });
+    } catch (e) {
+      failures.push(paths[i]);
+    }
+    await sleep(400); // same breathing room as single delete, between every request
+  }
+
+  setStatus(failures.length
+    ? `Deleted ${paths.length - failures.length}/${paths.length}, failed: ${failures.join(', ')}`
+    : `Deleted ${paths.length} file(s), refreshing...`, failures.length > 0);
+  await loadDir(currentPath);
+}
+
+document.getElementById('selectAll').onchange = (e) => {
+  const checked = e.target.checked;
+  document.querySelectorAll('#fileList input[type=checkbox]').forEach(cb => {
+    cb.checked = checked;
+    if (checked) selected.add(cb.dataset.path); else selected.delete(cb.dataset.path);
+  });
+  updateBulkBar();
+};
+
+document.getElementById('deleteSelectedBtn').onclick = bulkDelete;
+
+document.getElementById('connectBtn').onclick = () => {
+  host = document.getElementById('host').value.trim();
+  password = document.getElementById('password').value;
+  localStorage.setItem('sd_manager_host', host);
+  localStorage.setItem('sd_manager_password', password);
+  loadDir('/sd/');
+};
+
+if (host && password) {
+  loadDir('/sd/');
+}
+</script>
+</body>
+</html>

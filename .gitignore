@@ -1,0 +1,11 @@
+# Secrets - never commit the real one, only settings.toml.example
+sense/settings.toml
+
+# Piper voice model - large stock asset, downloaded separately (see suziq/README.md)
+suziq/python/voices/
+
+# Build/cache artifacts
+.DS_Store
+__pycache__/
+*.pyc
+suziq/.cache/

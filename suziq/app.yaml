@@ -1,0 +1,8 @@
+name: Oracle
+description: "Reads two dice from a photo and speaks a short reflective reading"
+ports: []
+bricks:
+- arduino:llm:
+    model: llamacpp:gemma-3-1b-it-Q4_0
+- arduino:web_ui: {}
+icon: 🔮
